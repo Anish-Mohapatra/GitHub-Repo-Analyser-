@@ -1,0 +1,288 @@
+"""
+GitHub Repository Analyzer
+===========================
+Fetches and analyzes public GitHub repositories for any user.
+Displays stats like top repos, most-used languages, star count, and activity.
+
+Usage:
+    python github_analyzer.py <github_username>
+    python github_analyzer.py <github_username> --export
+"""
+
+import requests
+import json
+import sys
+import os
+from datetime import datetime
+from collections import Counter
+
+
+# ---------- GitHub API ----------
+
+BASE_URL = "https://api.github.com"
+HEADERS = {"Accept": "application/vnd.github.v3+json"}
+
+
+def get_user_profile(username):
+    """Fetch the public profile data of a GitHub user."""
+    url = f"{BASE_URL}/users/{username}"
+    response = requests.get(url, headers=HEADERS)
+
+    if response.status_code == 404:
+        print(f"\n❌ User '{username}' not found on GitHub.")
+        sys.exit(1)
+    elif response.status_code == 403:
+        print("\n⚠️  API rate limit exceeded. Try again later or use a personal access token.")
+        sys.exit(1)
+    elif response.status_code != 200:
+        print(f"\n❌ Error fetching user data: {response.status_code}")
+        sys.exit(1)
+
+    return response.json()
+
+
+def get_repositories(username, max_repos=100):
+    """Fetch all public repositories for a GitHub user (up to max_repos)."""
+    repos = []
+    page = 1
+    per_page = 30
+
+    while len(repos) < max_repos:
+        url = f"{BASE_URL}/users/{username}/repos"
+        params = {"page": page, "per_page": per_page, "sort": "updated"}
+        response = requests.get(url, headers=HEADERS, params=params)
+
+        if response.status_code != 200:
+            break
+
+        data = response.json()
+        if not data:
+            break
+
+        repos.extend(data)
+        page += 1
+
+        if len(data) < per_page:
+            break
+
+    return repos[:max_repos]
+
+
+# ---------- Analysis Functions ----------
+
+def analyze_languages(repos):
+    """Count how many repos use each programming language."""
+    language_count = Counter()
+    for repo in repos:
+        lang = repo.get("language")
+        if lang:
+            language_count[lang] += 1
+    return language_count
+
+
+def get_top_repos(repos, n=5, sort_by="stars"):
+    """Return top N repos sorted by stars or forks."""
+    key = "stargazers_count" if sort_by == "stars" else "forks_count"
+    return sorted(repos, key=lambda r: r.get(key, 0), reverse=True)[:n]
+
+
+def calculate_stats(repos):
+    """Calculate overall statistics across all repositories."""
+    total_stars = sum(r.get("stargazers_count", 0) for r in repos)
+    total_forks = sum(r.get("forks_count", 0) for r in repos)
+    total_watchers = sum(r.get("watchers_count", 0) for r in repos)
+    forked_repos = sum(1 for r in repos if r.get("fork"))
+    original_repos = len(repos) - forked_repos
+
+    return {
+        "total_stars": total_stars,
+        "total_forks": total_forks,
+        "total_watchers": total_watchers,
+        "original_repos": original_repos,
+        "forked_repos": forked_repos,
+    }
+
+
+def get_recent_activity(repos, n=3):
+    """Return the N most recently updated repositories."""
+    return sorted(repos, key=lambda r: r.get("updated_at", ""), reverse=True)[:n]
+
+
+def format_date(iso_string):
+    """Convert ISO 8601 date string to a readable format."""
+    if not iso_string:
+        return "N/A"
+    dt = datetime.strptime(iso_string, "%Y-%m-%dT%H:%M:%SZ")
+    return dt.strftime("%b %d, %Y")
+
+
+# ---------- Display Functions ----------
+
+def print_separator(char="─", length=60):
+    print(char * length)
+
+
+def display_profile(profile):
+    """Print user profile summary."""
+    print_separator("═")
+    print(f"  👤 GitHub Profile: @{profile['login']}")
+    print_separator("═")
+    print(f"  Name        : {profile.get('name') or 'Not set'}")
+    print(f"  Bio         : {profile.get('bio') or 'No bio'}")
+    print(f"  Location    : {profile.get('location') or 'Not specified'}")
+    print(f"  Followers   : {profile.get('followers', 0):,}")
+    print(f"  Following   : {profile.get('following', 0):,}")
+    print(f"  Public Repos: {profile.get('public_repos', 0):,}")
+    print(f"  Joined      : {format_date(profile.get('created_at'))}")
+    print(f"  Profile URL : {profile.get('html_url')}")
+    print_separator()
+
+
+def display_stats(stats):
+    """Print overall repository statistics."""
+    print("\n  📊 Repository Overview")
+    print_separator()
+    print(f"  ⭐ Total Stars     : {stats['total_stars']:,}")
+    print(f"  🍴 Total Forks     : {stats['total_forks']:,}")
+    print(f"  👁️  Total Watchers  : {stats['total_watchers']:,}")
+    print(f"  🗂️  Original Repos  : {stats['original_repos']}")
+    print(f"  🔁 Forked Repos    : {stats['forked_repos']}")
+    print_separator()
+
+
+def display_languages(language_count):
+    """Print language usage breakdown."""
+    print("\n  🧑‍💻 Top Programming Languages")
+    print_separator()
+    if not language_count:
+        print("  No language data found.")
+        return
+
+    total = sum(language_count.values())
+    for lang, count in language_count.most_common(8):
+        percentage = (count / total) * 100
+        bar = "█" * int(percentage / 5)
+        print(f"  {lang:<18} {bar:<20} {percentage:5.1f}%  ({count} repos)")
+    print_separator()
+
+
+def display_top_repos(top_repos, label="⭐ Top Repositories by Stars"):
+    """Print top repositories."""
+    print(f"\n  {label}")
+    print_separator()
+    for i, repo in enumerate(top_repos, start=1):
+        name = repo.get("name", "Unknown")
+        stars = repo.get("stargazers_count", 0)
+        forks = repo.get("forks_count", 0)
+        language = repo.get("language") or "N/A"
+        description = repo.get("description") or "No description"
+        url = repo.get("html_url", "")
+
+        # Truncate long descriptions
+        if len(description) > 60:
+            description = description[:57] + "..."
+
+        print(f"\n  {i}. {name}")
+        print(f"     📝 {description}")
+        print(f"     ⭐ {stars}  🍴 {forks}  🔤 {language}")
+        print(f"     🔗 {url}")
+    print_separator()
+
+
+def display_recent_activity(recent_repos):
+    """Print recently updated repos."""
+    print("\n  🕐 Recently Updated Repositories")
+    print_separator()
+    for repo in recent_repos:
+        name = repo.get("name", "Unknown")
+        updated = format_date(repo.get("updated_at"))
+        language = repo.get("language") or "N/A"
+        print(f"  • {name:<30} Updated: {updated}  ({language})")
+    print_separator()
+
+
+# ---------- Export Function ----------
+
+def export_report(username, profile, stats, language_count, top_repos):
+    """Export the analysis to a JSON file."""
+    report = {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "username": username,
+        "profile": {
+            "name": profile.get("name"),
+            "bio": profile.get("bio"),
+            "location": profile.get("location"),
+            "followers": profile.get("followers"),
+            "following": profile.get("following"),
+            "public_repos": profile.get("public_repos"),
+            "joined": format_date(profile.get("created_at")),
+            "url": profile.get("html_url"),
+        },
+        "stats": stats,
+        "top_languages": dict(language_count.most_common(10)),
+        "top_repos": [
+            {
+                "name": r["name"],
+                "stars": r.get("stargazers_count", 0),
+                "forks": r.get("forks_count", 0),
+                "language": r.get("language"),
+                "description": r.get("description"),
+                "url": r.get("html_url"),
+            }
+            for r in top_repos
+        ],
+    }
+
+    filename = f"{username}_github_report.json"
+    with open(filename, "w") as f:
+        json.dump(report, f, indent=4)
+
+    print(f"\n💾 Report exported to: {filename}")
+
+
+# ---------- Main ----------
+
+def main():
+    # Parse arguments
+    if len(sys.argv) < 2:
+        print("\n⚠️  Usage: python github_analyzer.py <username> [--export]")
+        print("   Example: python github_analyzer.py torvalds")
+        sys.exit(1)
+
+    username = sys.argv[1]
+    export = "--export" in sys.argv
+
+    print(f"\n🔍 Analyzing GitHub profile: @{username} ...")
+    print("    Fetching data from GitHub API...\n")
+
+    # Fetch data
+    profile = get_user_profile(username)
+    repos = get_repositories(username)
+
+    if not repos:
+        print(f"\n📭 @{username} has no public repositories.")
+        display_profile(profile)
+        return
+
+    # Analyze
+    stats = calculate_stats(repos)
+    language_count = analyze_languages(repos)
+    top_starred = get_top_repos(repos, n=5, sort_by="stars")
+    recent = get_recent_activity(repos, n=3)
+
+    # Display
+    display_profile(profile)
+    display_stats(stats)
+    display_languages(language_count)
+    display_top_repos(top_starred)
+    display_recent_activity(recent)
+
+    # Export if requested
+    if export:
+        export_report(username, profile, stats, language_count, top_starred)
+
+    print(f"\n✅ Analysis complete for @{username}!\n")
+
+
+if __name__ == "__main__":
+    main()
